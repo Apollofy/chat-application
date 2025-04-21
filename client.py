@@ -3,6 +3,12 @@ import threading
 import tkinter as tk
 from tkinter import scrolledtext, simpledialog, messagebox
 from datetime import datetime
+import rsa
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
+import base64
+import json
 
 class ChatClient:
     def __init__(self, host='127.0.0.1', port=5555):
@@ -11,6 +17,11 @@ class ChatClient:
         self.nickname = ""
         self.client_socket = None
         self.connected = False
+        
+        # Cryptography related attributes
+        self.public_key, self.private_key = rsa.newkeys(2048)
+        self.server_public_key = None
+        self.session_key = None
         
         # Initialize GUI
         self.setup_gui()
@@ -70,6 +81,41 @@ class ChatClient:
         else:
             self.connect_to_server()
     
+    def encrypt_aes(self, plaintext):
+        """Encrypt a message using AES with the session key"""
+        if not self.session_key:
+            return None
+        
+        iv = get_random_bytes(16)
+        cipher = AES.new(self.session_key, AES.MODE_CBC, iv)
+        padded_data = pad(plaintext.encode('utf-8'), AES.block_size)
+        ciphertext = cipher.encrypt(padded_data)
+        
+        # Combine IV and ciphertext for transmission
+        encrypted_data = {
+            'iv': base64.b64encode(iv).decode('utf-8'),
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
+        }
+        return json.dumps(encrypted_data)
+    
+    def decrypt_aes(self, encrypted_json):
+        """Decrypt a message using AES with the session key"""
+        if not self.session_key:
+            return None
+        
+        try:
+            encrypted_data = json.loads(encrypted_json)
+            iv = base64.b64decode(encrypted_data['iv'])
+            ciphertext = base64.b64decode(encrypted_data['ciphertext'])
+            
+            cipher = AES.new(self.session_key, AES.MODE_CBC, iv)
+            padded_plaintext = cipher.decrypt(ciphertext)
+            plaintext = unpad(padded_plaintext, AES.block_size)
+            return plaintext.decode('utf-8')
+        except Exception as e:
+            self.update_chat(f"Decryption error: {e}")
+            return None
+    
     def connect_to_server(self):
         """Connect to the chat server"""
         try:
@@ -85,6 +131,19 @@ class ChatClient:
             # Send nickname to server
             self.client_socket.send(self.nickname.encode('utf-8'))
             
+            # Receive server's public key
+            server_key_pem = self.client_socket.recv(4096)
+            self.server_public_key = rsa.PublicKey.load_pkcs1(server_key_pem)
+            
+            # Send client's public key to server
+            client_key_pem = self.public_key.save_pkcs1()
+            self.client_socket.send(client_key_pem)
+            
+            # Generate and send AES session key
+            self.session_key = get_random_bytes(16)  # 128-bit key for AES
+            encrypted_session_key = rsa.encrypt(self.session_key, self.server_public_key)
+            self.client_socket.send(encrypted_session_key)
+            
             # Start receiving thread
             self.connected = True
             receive_thread = threading.Thread(target=self.receive_messages)
@@ -95,9 +154,10 @@ class ChatClient:
             self.conn_button.config(text="Disconnect")
             self.message_entry.config(state=tk.NORMAL)
             self.send_button.config(state=tk.NORMAL)
-            self.status_var.set(f"Connected as {self.nickname}")
+            self.status_var.set(f"Connected as {self.nickname} (Encrypted)")
             
             self.update_chat(f"Connected to server at {self.host}:{self.port}")
+            self.update_chat("Secure connection established with end-to-end encryption")
             
         except Exception as e:
             messagebox.showerror("Connection Error", f"Could not connect to server: {e}")
@@ -119,14 +179,21 @@ class ChatClient:
             self.status_var.set("Disconnected")
             
             self.update_chat("Disconnected from server")
+            
+            # Reset encryption
+            self.server_public_key = None
+            self.session_key = None
     
     def receive_messages(self):
         """Receive messages from the server"""
         while self.connected:
             try:
-                message = self.client_socket.recv(1024).decode('utf-8')
+                message = self.client_socket.recv(4096).decode('utf-8')
                 if message:
-                    self.update_chat(message)
+                    # All messages from server are now encrypted
+                    decrypted_message = self.decrypt_aes(message)
+                    if decrypted_message:
+                        self.update_chat(decrypted_message)
                 else:
                     # Server closed connection
                     self.connected = False
@@ -151,13 +218,14 @@ class ChatClient:
         message = self.message_entry.get().strip()
         if message and self.connected:
             try:
-                # Send message to server
-                self.client_socket.send(message.encode('utf-8'))
-                
                 # Display my own message in the chat
                 timestamp = datetime.now().strftime('%H:%M:%S')
                 own_message = f"[{timestamp}] {self.nickname} (You): {message}"
                 self.update_chat(own_message)
+                
+                # Encrypt and send message to server
+                encrypted_message = self.encrypt_aes(message)
+                self.client_socket.send(encrypted_message.encode('utf-8'))
                 
                 # Clear input field
                 self.message_entry.delete(0, tk.END)

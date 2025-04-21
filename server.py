@@ -3,6 +3,12 @@ import socket
 import threading
 import time
 from datetime import datetime
+import rsa
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import base64
+import json
+from Crypto.Random import get_random_bytes
 
 class ChatServer:
     def __init__(self, host='127.0.0.1', port=5555):
@@ -11,7 +17,51 @@ class ChatServer:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((self.host, self.port))
+        
+        # Client information storage
         self.clients = {}  # socket: nickname
+        
+        # Encryption storage
+        self.public_key, self.private_key = rsa.newkeys(2048)
+        self.client_keys = {}  # socket: public_key
+        self.session_keys = {}  # socket: session_key
+        
+    def encrypt_message(self, message, client_socket):
+        """Encrypt a message using AES with the client's session key"""
+        if client_socket not in self.session_keys:
+            return None
+            
+        session_key = self.session_keys[client_socket]
+        iv = get_random_bytes(16)  # Generate random IV for each message
+        cipher = AES.new(session_key, AES.MODE_CBC, iv)
+        padded_data = pad(message.encode('utf-8'), AES.block_size)
+        ciphertext = cipher.encrypt(padded_data)
+        
+        # Combine IV and ciphertext for transmission
+        encrypted_data = {
+            'iv': base64.b64encode(iv).decode('utf-8'),
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
+        }
+        return json.dumps(encrypted_data)
+        
+    def decrypt_message(self, encrypted_json, client_socket):
+        """Decrypt a message using AES with the client's session key"""
+        if client_socket not in self.session_keys:
+            return None
+            
+        try:
+            encrypted_data = json.loads(encrypted_json)
+            iv = base64.b64decode(encrypted_data['iv'])
+            ciphertext = base64.b64decode(encrypted_data['ciphertext'])
+            
+            session_key = self.session_keys[client_socket]
+            cipher = AES.new(session_key, AES.MODE_CBC, iv)
+            padded_plaintext = cipher.decrypt(ciphertext)
+            plaintext = unpad(padded_plaintext, AES.block_size)
+            return plaintext.decode('utf-8')
+        except Exception as e:
+            print(f"Decryption error: {e}")
+            return None
         
     def broadcast(self, message, sender_socket=None):
         """Send message to all connected clients except the sender"""
@@ -34,7 +84,10 @@ class ChatServer:
             # Don't send message back to the sender
             if client_socket != sender_socket:
                 try:
-                    client_socket.send(formatted_message.encode('utf-8'))
+                    # All messages are encrypted with client's session key
+                    if client_socket in self.session_keys:
+                        encrypted_msg = self.encrypt_message(formatted_message, client_socket)
+                        client_socket.send(encrypted_msg.encode('utf-8'))
                 except:
                     # Mark for removal but don't modify dictionary during iteration
                     clients_to_remove.append(client_socket)
@@ -49,6 +102,13 @@ class ChatServer:
             nickname = self.clients[client_socket]
             print(f"Removing client: {nickname}")
             del self.clients[client_socket]
+            
+            # Remove encryption keys
+            if client_socket in self.client_keys:
+                del self.client_keys[client_socket]
+            if client_socket in self.session_keys:
+                del self.session_keys[client_socket]
+                
             try:
                 client_socket.close()
             except:
@@ -64,13 +124,29 @@ class ChatServer:
             # Get nickname
             nickname = client_socket.recv(1024).decode('utf-8')
             
+            # Exchange encryption keys
+            # Send server's public key
+            client_socket.send(self.public_key.save_pkcs1())
+            
+            # Receive client's public key
+            client_key_pem = client_socket.recv(4096)
+            client_public_key = rsa.PublicKey.load_pkcs1(client_key_pem)
+            self.client_keys[client_socket] = client_public_key
+            
+            # Receive encrypted session key
+            encrypted_session_key = client_socket.recv(4096)
+            session_key = rsa.decrypt(encrypted_session_key, self.private_key)
+            self.session_keys[client_socket] = session_key
+            
             # Store client information
             self.clients[client_socket] = nickname
             print(f"New client connected: {nickname} from {address}")
+            print(f"Secure connection established with {nickname}")
             
-            # Welcome the client
+            # Welcome the client - this needs to be encrypted too
             welcome = f"Welcome to the chat, {nickname}!"
-            client_socket.send(welcome.encode('utf-8'))
+            encrypted_welcome = self.encrypt_message(welcome, client_socket)
+            client_socket.send(encrypted_welcome.encode('utf-8'))
             
             # Announce the new client to others
             self.broadcast(f"{nickname} joined the chat")
@@ -78,10 +154,13 @@ class ChatServer:
             # Process client messages
             while True:
                 try:
-                    message = client_socket.recv(1024).decode('utf-8')
-                    if message:
-                        print(f"Message from {nickname}: {message}")
-                        self.broadcast(message, client_socket)
+                    encrypted_message = client_socket.recv(4096).decode('utf-8')
+                    if encrypted_message:
+                        # Decrypt the message
+                        message = self.decrypt_message(encrypted_message, client_socket)
+                        if message:
+                            print(f"Message from {nickname}: {message}")
+                            self.broadcast(message, client_socket)
                     else:
                         # Client disconnected
                         break
@@ -99,6 +178,7 @@ class ChatServer:
         """Start the server"""
         self.server_socket.listen(5)
         print(f"Server started on {self.host}:{self.port}")
+        print("Using RSA for key exchange and AES for message encryption")
         
         try:
             while True:

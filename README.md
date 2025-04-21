@@ -1,42 +1,58 @@
-# Simple Python Chat Application
+# Encrypted Chat Application
 
-A minimalistic client-server chat application built with Python.
+A simple chat application with RSA and AES encryption for secure communication.
 
 ## Features
 
-- Real-time messaging with timestamps
-- Multiple clients can connect simultaneously
-- Username/nickname support
-- Simple GUI client built with Tkinter
-- Easy to understand codebase
+- RSA encryption for secure key exchange
+- AES encryption for message content
+- End-to-end encrypted messaging
+- Simple GUI interface
 
-## Requirements
+## Security Implementation
 
-- Python 3.x
-- Tkinter (usually comes with Python)
+- RSA 2048-bit keys for asymmetric encryption during initial handshake
+- AES 128-bit keys for symmetric encryption of messages
+- Unique session keys for each client connection
+- Secure key exchange protocol
+
+## Installation
+
+1. Clone this repository
+2. Install the required dependencies:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Usage
 
-### Starting the Server
+### Start the Server
 
-1. Run the server:
-   ```
-   python server.py
-   ```
-2. Server will start on localhost (127.0.0.1) port 5555
+```bash
+python server.py
+```
 
-### Starting a Client
+The server will start on localhost (127.0.0.1) port 5555 by default.
 
-1. Run the client:
-   ```
-   python client.py
-   ```
-2. Click "Connect" button
-3. Enter your nickname when prompted
-4. Start chatting!
+### Start the Client
 
-### Commands
+```bash
+python client.py
+```
 
-- Type a message and press Enter or click "Send" to send
-- Click "Disconnect" to leave the chat
-- Close the window to exit the application 
+Multiple clients can connect to the same server.
+
+## How it Works
+
+1. Client and server generate RSA key pairs on startup
+2. During connection:
+   - Client and server exchange public RSA keys
+   - Client generates an AES session key
+   - Client encrypts the session key with the server's public RSA key and sends it
+   - All subsequent messages are encrypted with AES using the session key
+3. Messages in the chat are encrypted end-to-end
+
+## License
+
+MIT 
